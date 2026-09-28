@@ -1,39 +1,93 @@
-﻿
-#Disable Warning
+﻿#Disable Warning
 Public Class Form1
-    ' 窗体控件声明
+    ' ==================== 依赖扫描相关常量 ====================
+    ''' <summary>
+    ''' 扫描项目目录时需要排除的文件/文件夹名称（不区分大小写）。
+    ''' </summary>
+    Private Shared ReadOnly DependencyIgnoreNames As String() = {
+        ".git", ".gitignore", ".gitattributes", ".gitmodules", ".github",
+        ".vs", "My Project", "bin", "obj",
+        "README.md", "readme.md", "ReadMe.md", "README.txt", "README"
+    }
+
+    ''' <summary>
+    ''' 扫描项目目录时需要排除的文件扩展名（不区分大小写）。
+    ''' 这些是源码/项目/IDE 相关文件，不属于运行时依赖。
+    ''' </summary>
+    Private Shared ReadOnly DependencyIgnoreExtensions As String() = {
+        ".vb", ".cs", ".fs",
+        ".resx",
+        ".config",
+        ".sln", ".slnx", ".suo", ".user",
+        ".vbproj", ".csproj", ".fsproj",
+        ".pdb", ".xml",
+        ".tmp", ".cache"
+    }
+
+    ' ==================== 窗体控件声明 ====================
+    ' 项目文件路径输入框
     Private WithEvents TxtProjectFile As TextBox
+    ' 发布目录输入框
     Private WithEvents TxtPublishDir As TextBox
+    ' 日志输出框
     Private WithEvents TxtLog As TextBox
+    ' MSBuild 程序路径输入框
     Private WithEvents TxtMsbuild As TextBox
+    ' 浏览项目文件按钮
     Private WithEvents BtnBrowseProject As Button
+    ' 浏览发布目录按钮
     Private WithEvents BtnBrowsePublish As Button
+    ' 浏览 MSBuild 按钮
     Private WithEvents BtnBrowseMsbuild As Button
+    ' 开始发布按钮
     Private WithEvents BtnPublish As Button
+    ' 取消按钮
     Private WithEvents BtnCancel As Button
+    ' 运行时标识符下拉框
     Private WithEvents CboRuntime As ComboBox
+    ' 自包含复选框
     Private WithEvents ChkSelfContained As CheckBox
+    ' 单文件复选框
     Private WithEvents ChkSingleFile As CheckBox
+    ' 生成压缩包复选框
     Private WithEvents ChkCreatExe As CheckBox
+    ' 项目文件标签
     Private lblProject As Label
+    ' 发布目录标签
     Private lblPublish As Label
+    ' 运行时标识符标签
     Private lblRuntime As Label
+    ' MSBuild 目录标签
     Private LbAd As Label
 
+    ' 设置版本号输入框
     Private WithEvents TxtCustomExeName As TextBox
+    ' 设置版本号标签
     Private WithEvents lblCustomExeName As Label
+    ' 制作压缩包按钮
+    Private WithEvents BtnCreateZip As Button
 
+    ' 依赖勾选列表框（列出扫描到的依赖，默认全部勾选）
+    Private WithEvents ClbDependencies As CheckedListBox
+    ' 依赖列表框标签
+    Private lblDependencies As Label
+
+    ' ==================== 窗体加载 ====================
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         InitializeForm()
 
-        '加载上次路径
+        ' 加载上次项目文件路径
         If Not String.IsNullOrEmpty(My.Settings.LastProjectFile) Then
             Dim lp As String = My.Settings.LastProjectFile
             If System.IO.File.Exists(lp) Then
                 TxtProjectFile.Text = lp
+                LoadVersionFromProject(lp)
+                ' 刷新依赖列表
+                RefreshDependencyList(lp)
             End If
         End If
 
+        ' 加载上次发布目录
         If Not String.IsNullOrEmpty(My.Settings.LastPublishDir) Then
             Dim lp As String = My.Settings.LastPublishDir
             If System.IO.Directory.Exists(lp) Then
@@ -41,13 +95,25 @@ Public Class Form1
             End If
         End If
 
+        ' 加载上次 MSBuild 路径；若没有则自动查找
         If Not String.IsNullOrEmpty(My.Settings.LastMsBuildFile) Then
             Dim lp As String = My.Settings.LastMsBuildFile
             If System.IO.File.Exists(lp) Then
                 TxtMsbuild.Text = lp
             End If
         End If
+
+        ' 若 MSBuild 仍为空，则尝试自动获取
+        If String.IsNullOrWhiteSpace(TxtMsbuild.Text) Then
+            Dim autoMsbuild As String = FindMsBuildPath()
+            If Not String.IsNullOrEmpty(autoMsbuild) Then
+                TxtMsbuild.Text = autoMsbuild
+                SaveLastParts()
+            End If
+        End If
     End Sub
+
+    ' ==================== 保存上次使用路径 ====================
     Private Sub SaveLastParts()
         Try
             If Not String.IsNullOrEmpty(TxtProjectFile.Text) Then
@@ -63,13 +129,16 @@ Public Class Form1
             End If
             My.Settings.Save()
         Catch ex As Exception
+            ' 忽略保存异常
         End Try
     End Sub
+
+    ' ==================== 初始化窗体 ====================
     Private Sub InitializeForm()
         ' 设置窗体属性
         Me.Text = "项目发布工具"
         Me.StartPosition = FormStartPosition.CenterScreen
-        Me.MinimumSize = New Size(600, 600)
+        Me.MinimumSize = New Size(700, 720)
         Me.AllowDrop = True
 
         ' 创建控件
@@ -84,11 +153,15 @@ Public Class Form1
         Dim args As String() = Environment.GetCommandLineArgs()
         If args.Length > 1 AndAlso System.IO.File.Exists(args(1)) Then
             TxtProjectFile.Text = args(1)
+            LoadVersionFromProject(args(1))
+            RefreshDependencyList(args(1))
         End If
     End Sub
 
+    ' ==================== 创建控件 ====================
     Private Sub CreateControls()
         Dim yPos As Integer = 20
+
         ' 项目文件选择
         lblProject = New Label With {
             .Text = "选择项目文件：",
@@ -98,16 +171,17 @@ Public Class Form1
 
         TxtProjectFile = New TextBox With {
             .Location = New Point(140, yPos),
-            .Size = New Size(350, 25),
+            .Size = New Size(430, 25),
             .ReadOnly = True
         }
 
         BtnBrowseProject = New Button With {
             .Text = "浏览...",
-            .Location = New Point(500, yPos),
+            .Location = New Point(580, yPos),
             .Size = New Size(80, 25)
         }
         yPos += 40
+
         ' 发布目录选择
         lblPublish = New Label With {
             .Text = "选择发布目录：",
@@ -117,18 +191,19 @@ Public Class Form1
 
         TxtPublishDir = New TextBox With {
             .Location = New Point(140, yPos),
-            .Size = New Size(350, 25),
+            .Size = New Size(430, 25),
             .ReadOnly = True
         }
 
         BtnBrowsePublish = New Button With {
             .Text = "浏览...",
-            .Location = New Point(500, yPos),
+            .Location = New Point(580, yPos),
             .Size = New Size(80, 25)
         }
 
         yPos += 40
-        'Msbuild目录
+
+        ' MSBuild 目录
         LbAd = New Label With {
             .Text = "MSbuild目录：",
             .Location = New Point(20, yPos),
@@ -136,13 +211,13 @@ Public Class Form1
         }
         TxtMsbuild = New TextBox With {
             .Location = New Point(140, yPos),
-            .Size = New Size(350, 25),
+            .Size = New Size(430, 25),
             .ReadOnly = True
         }
 
         BtnBrowseMsbuild = New Button With {
             .Text = "浏览...",
-            .Location = New Point(500, yPos),
+            .Location = New Point(580, yPos),
             .Size = New Size(80, 25)
         }
 
@@ -176,27 +251,30 @@ Public Class Form1
             .Size = New Size(80, 25),
             .Checked = True
         }
+
         ChkCreatExe = New CheckBox With {
             .Text = "生成压缩包",
             .Location = New Point(460, yPos),
             .Size = New Size(100, 25),
-            .Checked = False}
-        ' 添加最简单的安装包选项
+            .Checked = False
+        }
+
         yPos += 40
 
-        ' --- 自定义程序名称输入框 ---
+        ' --- 设置版本号输入框 ---
         lblCustomExeName = New Label With {
             .Text = "设置版本号：",
             .Location = New Point(20, yPos),
             .Size = New Size(120, 25),
-            .Enabled = ChkSingleFile.Checked ' 初始状态禁用，跟随“单文件”复选框
+            .Enabled = ChkSingleFile.Checked
         }
 
         TxtCustomExeName = New TextBox With {
             .Location = New Point(140, yPos),
             .Size = New Size(200, 25),
-            .Enabled = ChkSingleFile.Checked ' 初始状态禁用
+            .Enabled = ChkSingleFile.Checked
         }
+
         ' 提示文本
         Dim lblTip As New Label With {
             .Text = "(仅当勾选‘单文件’时生效，无需后缀,格式例如:1.0.2)",
@@ -205,8 +283,29 @@ Public Class Form1
             .ForeColor = Color.Gray,
             .Font = New Font("微软雅黑", 8)
         }
+
         yPos += 40
 
+        ' --- 依赖勾选列表框 ---
+        lblDependencies = New Label With {
+            .Text = "运行时依赖项：",
+            .Location = New Point(20, yPos),
+            .Size = New Size(120, 25)
+        }
+
+        ClbDependencies = New CheckedListBox With {
+            .Location = New Point(140, yPos),
+            .Size = New Size(430, 110),
+            .CheckOnClick = True,
+            .HorizontalScrollbar = True
+        }
+        ' 依赖列表框变化时，日志输出提示
+        AddHandler ClbDependencies.ItemCheck, Sub(s, evt)
+                                                  ' 只在勾选状态变化后延迟刷新（避免重入）
+                                                  ' 这里不做额外处理，保持默认行为
+                                              End Sub
+
+        yPos += 120
 
         ' 发布按钮
         BtnPublish = New Button With {
@@ -218,25 +317,30 @@ Public Class Form1
             .Font = New Font("微软雅黑", 10, FontStyle.Bold)
         }
 
+        ' 取消按钮
         BtnCancel = New Button With {
             .Text = "取消",
             .Location = New Point(270, yPos),
             .Size = New Size(120, 35)
         }
-        Dim CreateZip As New Button With {
+
+        ' 制作压缩包按钮
+        BtnCreateZip = New Button With {
             .Text = "制作压缩包",
             .Location = New Point(400, yPos),
             .Size = New Size(150, 35),
             .Enabled = False,
             .BackColor = Color.LightGreen
         }
+
         yPos += 40
+
         ' 日志文本框
         TxtLog = New TextBox With {
             .Multiline = True,
             .ScrollBars = ScrollBars.Vertical,
             .Location = New Point(0, yPos),
-            .Size = New Size(Me.Width, 260),
+            .Size = New Size(Me.Width, 220),
             .ReadOnly = True,
             .Font = New Font("楷体", 10),
             .BackColor = Color.Black,
@@ -244,41 +348,455 @@ Public Class Form1
             .Visible = False
         }
 
-
         ' 添加到窗体
         Me.Controls.AddRange({
             lblProject, TxtProjectFile, BtnBrowseProject,
             lblPublish, TxtPublishDir, BtnBrowsePublish,
             LbAd, TxtMsbuild, BtnBrowseMsbuild,
             lblRuntime, CboRuntime, ChkSelfContained, ChkSingleFile,
-            BtnPublish, BtnCancel, TxtLog, ChkCreatExe, CreateZip, lblCustomExeName, TxtCustomExeName, lblTip
+            BtnPublish, BtnCancel, TxtLog, ChkCreatExe, BtnCreateZip,
+            lblCustomExeName, TxtCustomExeName, lblTip,
+            lblDependencies, ClbDependencies
         })
+
+        ' 压缩包复选框联动
         AddHandler ChkCreatExe.CheckedChanged, Sub()
-                                                   CreateZip.Enabled = ChkCreatExe.Checked
+                                                   BtnCreateZip.Enabled = ChkCreatExe.Checked
                                                End Sub
-        AddHandler CreateZip.Click, Sub()
-                                        If ChkCreatExe.Checked Then
-                                            TxtLog.Visible = True
-                                            Dim cur = DateTime.Now
-                                            Dim publishDir As String = TxtPublishDir.Text
-                                            Dim projectName As String = InputBox("请输入制作成压缩包(.ZIP)的名称", "压缩包命名提示")
-                                            CreateDebugOutputPackage(projectName, publishDir)
-                                            LogMessage($"打包状态: 成功 ✓")
-                                            LogMessage($"总耗时:{DateDiff("s", cur, Now)}s")
-                                        End If
-                                    End Sub
-        ' --- 绑定“单文件”复选框与自定义名称输入框的启用状态 ---
+
+        ' 制作压缩包按钮点击
+        AddHandler BtnCreateZip.Click, Sub()
+                                           If ChkCreatExe.Checked Then
+                                               TxtLog.Visible = True
+                                               Dim cur = DateTime.Now
+                                               Dim publishDir As String = TxtPublishDir.Text
+                                               Dim projectName As String = InputBox("请输入制作成压缩包(.ZIP)的名称", "压缩包命名提示")
+                                               CreateDebugOutputPackage(projectName, publishDir)
+                                               LogMessage($"打包状态: 成功 ✓")
+                                               LogMessage($"总耗时:{DateDiff("s", cur, Now)}s")
+                                           End If
+                                       End Sub
+
+        ' --- 绑定“单文件”复选框与版本号输入框的启用状态 ---
         AddHandler ChkSingleFile.CheckedChanged, Sub()
                                                      Dim isEnabled As Boolean = ChkSingleFile.Checked
                                                      lblCustomExeName.Enabled = isEnabled
                                                      TxtCustomExeName.Enabled = isEnabled
-                                                     ' 如果禁用，清空输入框内容
                                                      If Not isEnabled Then
                                                          TxtCustomExeName.Text = ""
+                                                     Else
+                                                         If Not String.IsNullOrEmpty(TxtProjectFile.Text) AndAlso System.IO.File.Exists(TxtProjectFile.Text) Then
+                                                             LoadVersionFromProject(TxtProjectFile.Text)
+                                                         End If
                                                      End If
                                                  End Sub
     End Sub
 
+    ' ==================== 判断是否为忽略项 ====================
+    ''' <summary>
+    ''' 判断给定名称是否属于需要排除的依赖项（Git/IDE/源码/项目文件）。
+    ''' </summary>
+    Private Function IsIgnoredDependency(name As String) As Boolean
+        If String.IsNullOrWhiteSpace(name) Then Return True
+
+        ' 名称完全匹配
+        For Each ignore In DependencyIgnoreNames
+            If String.Equals(name, ignore, StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        Next
+
+        ' 扩展名匹配
+        Dim ext As String = System.IO.Path.GetExtension(name)
+        If Not String.IsNullOrEmpty(ext) Then
+            For Each ignoreExt In DependencyIgnoreExtensions
+                If String.Equals(ext, ignoreExt, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+        End If
+
+        ' 特殊：.vbproj.user / .csproj.user 这类双扩展名
+        For Each ignoreExt In DependencyIgnoreExtensions
+            If name.EndsWith(ignoreExt, StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    ' ==================== 获取项目依赖（文件夹与文件） ====================
+    ''' <summary>
+    ''' 扫描项目目录，返回候选依赖文件夹和文件（已排除 Git/IDE/源码/项目文件）。
+    ''' 仅扫描项目根目录下的直接子项，不递归。
+    ''' </summary>
+    Private Function GetProjectDependencies(projectFilePath As String) As List(Of String)
+        Dim result As New List(Of String)
+        Try
+            If String.IsNullOrWhiteSpace(projectFilePath) OrElse Not System.IO.File.Exists(projectFilePath) Then
+                Return result
+            End If
+
+            Dim projectDir As String = System.IO.Path.GetDirectoryName(projectFilePath)
+            If String.IsNullOrWhiteSpace(projectDir) OrElse Not System.IO.Directory.Exists(projectDir) Then
+                Return result
+            End If
+
+            Dim projectFileName As String = System.IO.Path.GetFileName(projectFilePath)
+
+            ' 扫描目录（文件夹）
+            For Each subFolderPath In System.IO.Directory.GetDirectories(projectDir)
+                Dim name As String = System.IO.Path.GetFileName(subFolderPath)
+                If IsIgnoredDependency(name) Then Continue For
+                result.Add(subFolderPath)
+            Next
+
+            ' 扫描文件
+            For Each file In System.IO.Directory.GetFiles(projectDir)
+                Dim name As String = System.IO.Path.GetFileName(file)
+                If IsIgnoredDependency(name) Then Continue For
+                If String.Equals(name, projectFileName, StringComparison.OrdinalIgnoreCase) Then Continue For
+                result.Add(file)
+            Next
+        Catch ex As Exception
+            LogMessage($"[扫描项目依赖失败] {ex.Message}")
+        End Try
+        Return result
+    End Function
+
+    ' ==================== 刷新依赖勾选列表框 ====================
+    ''' <summary>
+    ''' 根据项目文件重新扫描依赖，填入勾选列表框，默认全部勾选。
+    ''' </summary>
+    Private Sub RefreshDependencyList(projectFilePath As String)
+        Try
+            If ClbDependencies Is Nothing Then Return
+            ClbDependencies.Items.Clear()
+
+            If String.IsNullOrWhiteSpace(projectFilePath) OrElse Not System.IO.File.Exists(projectFilePath) Then
+                Return
+            End If
+
+            Dim deps As List(Of String) = GetProjectDependencies(projectFilePath)
+            For Each item In deps
+                Dim isDir As Boolean = System.IO.Directory.Exists(item)
+                Dim name As String = System.IO.Path.GetFileName(item)
+                Dim display As String = If(isDir, $"[文件夹] {name}", $"[文件]   {name}")
+                ' 用对象保存完整路径，显示用 display
+                ClbDependencies.Items.Add(New DependencyItem(item, display), True)
+            Next
+
+            ' 若列表为空，界面保持空即可；发布时会提示“本项目无依赖文件”
+        Catch ex As Exception
+            LogMessage($"[刷新依赖列表失败] {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' 依赖项包装类：保存完整路径与显示文本。
+    ''' </summary>
+    Private Class DependencyItem
+        Public ReadOnly Property FullPath As String
+        Public ReadOnly Property Display As String
+
+        Public Sub New(fullPath As String, display As String)
+            Me.FullPath = fullPath
+            Me.Display = display
+        End Sub
+
+        Public Overrides Function ToString() As String
+            Return Display
+        End Function
+    End Class
+
+    ' ==================== 获取用户勾选的依赖 ====================
+    ''' <summary>
+    ''' 返回用户在勾选列表框中勾选的依赖项路径集合。
+    ''' </summary>
+    Private Function GetCheckedDependencies() As List(Of String)
+        Dim result As New List(Of String)
+        Try
+            If ClbDependencies Is Nothing Then Return result
+            For i As Integer = 0 To ClbDependencies.Items.Count - 1
+                If ClbDependencies.GetItemChecked(i) Then
+                    Dim item As DependencyItem = TryCast(ClbDependencies.Items(i), DependencyItem)
+                    If item IsNot Nothing Then
+                        result.Add(item.FullPath)
+                    End If
+                End If
+            Next
+        Catch ex As Exception
+            LogMessage($"[获取勾选依赖失败] {ex.Message}")
+        End Try
+        Return result
+    End Function
+
+    ' ==================== 日志输出勾选的依赖 ====================
+    ''' <summary>
+    ''' 在日志中列出用户勾选的依赖项；没有则提示“本项目无依赖文件”。
+    ''' </summary>
+    Private Sub LogCheckedDependencies()
+        Try
+            Dim deps As List(Of String) = GetCheckedDependencies()
+            If deps.Count = 0 Then
+                LogMessage("依赖检查: 本项目无依赖文件（或用户未勾选）")
+                Return
+            End If
+
+            LogMessage("依赖检查: 将复制以下依赖项")
+            For Each item In deps
+                Dim isDir As Boolean = System.IO.Directory.Exists(item)
+                Dim name As String = System.IO.Path.GetFileName(item)
+                If isDir Then
+                    LogMessage($"  [文件夹] {name}")
+                Else
+                    LogMessage($"  [文件]   {name}")
+                End If
+            Next
+        Catch ex As Exception
+            LogMessage($"[输出依赖信息失败] {ex.Message}")
+        End Try
+    End Sub
+
+    ' ==================== 复制勾选的依赖到发布目录 ====================
+    ''' <summary>
+    ''' 将用户勾选的依赖文件夹与文件复制到发布目录，直接覆盖同名文件。
+    ''' </summary>
+    Private Sub CopyCheckedDependencies(publishDir As String)
+        Try
+            If String.IsNullOrWhiteSpace(publishDir) OrElse Not System.IO.Directory.Exists(publishDir) Then
+                Return
+            End If
+
+            Dim deps As List(Of String) = GetCheckedDependencies()
+            If deps.Count = 0 Then
+                Return
+            End If
+
+            For Each item In deps
+                Dim name As String = System.IO.Path.GetFileName(item)
+                Dim targetPath As String = System.IO.Path.Combine(publishDir, name)
+
+                If System.IO.Directory.Exists(item) Then
+                    CopyDirectory(item, targetPath, True)
+                    LogMessage($"已复制依赖文件夹: {name}")
+                ElseIf System.IO.File.Exists(item) Then
+                    System.IO.File.Copy(item, targetPath, True)
+                    LogMessage($"已复制依赖文件: {name}")
+                End If
+            Next
+        Catch ex As Exception
+            LogMessage($"[复制依赖失败] {ex.Message}")
+        End Try
+    End Sub
+
+    ' ==================== 递归复制目录 ====================
+    ''' <summary>
+    ''' 递归复制目录到目标路径，overwrite 为 True 时覆盖同名文件。
+    ''' </summary>
+    Private Sub CopyDirectory(sourceDir As String, targetDir As String, overwrite As Boolean)
+        Try
+            If Not System.IO.Directory.Exists(targetDir) Then
+                System.IO.Directory.CreateDirectory(targetDir)
+            End If
+
+            ' 复制文件
+            For Each file In System.IO.Directory.GetFiles(sourceDir)
+                Dim fileName As String = System.IO.Path.GetFileName(file)
+                Dim targetFile As String = System.IO.Path.Combine(targetDir, fileName)
+                System.IO.File.Copy(file, targetFile, overwrite)
+            Next
+
+            ' 递归复制子目录
+            For Each subFolderPath In System.IO.Directory.GetDirectories(sourceDir)
+                Dim subFolderName As String = System.IO.Path.GetFileName(subFolderPath)
+                Dim targetSubDir As String = System.IO.Path.Combine(targetDir, subFolderName)
+                CopyDirectory(subFolderPath, targetSubDir, overwrite)
+            Next
+        Catch ex As Exception
+            LogMessage($"[复制目录失败] {sourceDir} -> {targetDir}: {ex.Message}")
+        End Try
+    End Sub
+
+    ' ==================== 自动查找 MSBuild 路径 ====================
+    Private Function FindMsBuildPath() As String
+        Try
+            Dim vswhereCandidates As String() = {
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio", "Installer", "vswhere.exe"),
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio", "Installer", "vswhere.exe")
+            }
+
+            For Each vswhere As String In vswhereCandidates
+                If System.IO.File.Exists(vswhere) Then
+                    Dim psi As New ProcessStartInfo With {
+                        .FileName = vswhere,
+                        .Arguments = "-latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe",
+                        .UseShellExecute = False,
+                        .RedirectStandardOutput = True,
+                        .CreateNoWindow = True,
+                        .StandardOutputEncoding = System.Text.Encoding.UTF8
+                    }
+                    Using p As Process = Process.Start(psi)
+                        Dim output As String = p.StandardOutput.ReadToEnd()
+                        p.WaitForExit()
+                        If Not String.IsNullOrWhiteSpace(output) Then
+                            Dim firstLine As String = output.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
+                            If Not String.IsNullOrWhiteSpace(firstLine) AndAlso System.IO.File.Exists(firstLine.Trim()) Then
+                                LogMessage($"[自动获取MSBuild] {firstLine.Trim()}")
+                                Return firstLine.Trim()
+                            End If
+                        End If
+                    End Using
+                End If
+            Next
+
+            Dim vsRoots As String() = {
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft Visual Studio"),
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio")
+            }
+            For Each root In vsRoots
+                If System.IO.Directory.Exists(root) Then
+                    Dim found As String = FindFileInDirectory(root, "MSBuild.exe", 6)
+                    If Not String.IsNullOrEmpty(found) Then
+                        LogMessage($"[自动获取MSBuild] {found}")
+                        Return found
+                    End If
+                End If
+            Next
+
+            Dim dotnetRoot As String = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "sdk")
+            If System.IO.Directory.Exists(dotnetRoot) Then
+                Dim sdkDirs As String() = System.IO.Directory.GetDirectories(dotnetRoot)
+                Array.Sort(sdkDirs)
+                Array.Reverse(sdkDirs)
+                For Each sdkDir In sdkDirs
+                    Dim candidate As String = System.IO.Path.Combine(sdkDir, "MSBuild.dll")
+                    If System.IO.File.Exists(candidate) Then
+                        Dim exeCandidate As String = System.IO.Path.Combine(sdkDir, "MSBuild.exe")
+                        If System.IO.File.Exists(exeCandidate) Then
+                            LogMessage($"[自动获取MSBuild] {exeCandidate}")
+                            Return exeCandidate
+                        End If
+                    End If
+                Next
+            End If
+
+            Dim envMsbuild As String = Environment.GetEnvironmentVariable("MSBuild")
+            If Not String.IsNullOrWhiteSpace(envMsbuild) AndAlso System.IO.File.Exists(envMsbuild) Then
+                LogMessage($"[自动获取MSBuild] {envMsbuild}")
+                Return envMsbuild
+            End If
+
+            Dim pathVar As String = Environment.GetEnvironmentVariable("PATH")
+            If Not String.IsNullOrWhiteSpace(pathVar) Then
+                For Each pathItem In pathVar.Split(System.IO.Path.PathSeparator)
+                    Try
+                        Dim candidate As String = System.IO.Path.Combine(pathItem.Trim(), "MSBuild.exe")
+                        If System.IO.File.Exists(candidate) Then
+                            LogMessage($"[自动获取MSBuild] {candidate}")
+                            Return candidate
+                        End If
+                    Catch
+                    End Try
+                Next
+            End If
+        Catch ex As Exception
+            LogMessage($"[自动获取MSBuild失败] {ex.Message}")
+        End Try
+
+        Return ""
+    End Function
+
+    ' ==================== 在目录中递归查找文件 ====================
+    Private Function FindFileInDirectory(rootDir As String, fileName As String, maxDepth As Integer) As String
+        Try
+            If maxDepth < 0 Then Return ""
+            Dim files As String() = System.IO.Directory.GetFiles(rootDir, fileName)
+            If files.Length > 0 Then
+                Return files(0)
+            End If
+            If maxDepth = 0 Then Return ""
+            For Each subFolderPath In System.IO.Directory.GetDirectories(rootDir)
+                Dim found As String = FindFileInDirectory(subFolderPath, fileName, maxDepth - 1)
+                If Not String.IsNullOrEmpty(found) Then Return found
+            Next
+        Catch
+        End Try
+        Return ""
+    End Function
+
+    ' ==================== 从项目文件读取版本号 ====================
+    Private Sub LoadVersionFromProject(projectFilePath As String)
+        Try
+            If String.IsNullOrWhiteSpace(projectFilePath) OrElse Not System.IO.File.Exists(projectFilePath) Then
+                Return
+            End If
+
+            Dim version As String = EnsureProjectVersion(projectFilePath)
+            If Not String.IsNullOrWhiteSpace(version) Then
+                If ChkSingleFile.Checked Then
+                    TxtCustomExeName.Text = version
+                End If
+            End If
+        Catch ex As Exception
+            LogMessage($"[读取项目版本号失败] {ex.Message}")
+        End Try
+    End Sub
+
+    ' ==================== 确保项目文件存在 <Version> 节点 ====================
+    Private Function EnsureProjectVersion(projectFilePath As String) As String
+        Const DefaultVersion As String = "1.0.0.0"
+
+        Try
+            Dim doc As New System.Xml.XmlDocument()
+            doc.PreserveWhitespace = True
+            doc.Load(projectFilePath)
+
+            Dim versionNode As System.Xml.XmlNode = doc.SelectSingleNode("//PropertyGroup/Version")
+            If versionNode IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(versionNode.InnerText) Then
+                Return versionNode.InnerText.Trim()
+            End If
+
+            Dim targetGroup As System.Xml.XmlNode = Nothing
+            Dim groups As System.Xml.XmlNodeList = doc.SelectNodes("//PropertyGroup")
+            If groups IsNot Nothing Then
+                For Each g As System.Xml.XmlNode In groups
+                    Dim cond As System.Xml.XmlAttribute = g.Attributes("Condition")
+                    If cond Is Nothing Then
+                        targetGroup = g
+                        Exit For
+                    End If
+                Next
+                If targetGroup Is Nothing AndAlso groups.Count > 0 Then
+                    targetGroup = groups(0)
+                End If
+            End If
+
+            If targetGroup Is Nothing Then
+                Dim projectRoot As System.Xml.XmlNode = doc.SelectSingleNode("//Project")
+                If projectRoot Is Nothing Then
+                    Return DefaultVersion
+                End If
+                targetGroup = doc.CreateElement("PropertyGroup")
+                projectRoot.AppendChild(targetGroup)
+            End If
+
+            Dim newVersionNode As System.Xml.XmlElement = doc.CreateElement("Version")
+            newVersionNode.InnerText = DefaultVersion
+            targetGroup.AppendChild(newVersionNode)
+
+            doc.Save(projectFilePath)
+
+            LogMessage($"[已自动写入版本号] {DefaultVersion}")
+            Return DefaultVersion
+        Catch ex As Exception
+            LogMessage($"[处理项目版本号失败] {ex.Message}")
+            Return DefaultVersion
+        End Try
+    End Function
+
+    ' ==================== 浏览项目文件 ====================
     Private Sub BtnBrowseProject_Click(sender As Object, e As EventArgs) Handles BtnBrowseProject.Click
         Using dialog As New OpenFileDialog()
             dialog.Filter = "项目文件 (*.csproj;*.vbproj;*.fsproj)|*.csproj;*.vbproj;*.fsproj|所有文件 (*.*)|*.*"
@@ -293,11 +811,15 @@ Public Class Form1
 
             If dialog.ShowDialog() = DialogResult.OK Then
                 TxtProjectFile.Text = dialog.FileName
-
+                LoadVersionFromProject(dialog.FileName)
+                ' 刷新依赖列表
+                RefreshDependencyList(dialog.FileName)
                 SaveLastParts()
             End If
         End Using
     End Sub
+
+    ' ==================== 浏览 MSBuild ====================
     Private Sub BtnBrowseMsbuild_Click(sender As Object, e As EventArgs) Handles BtnBrowseMsbuild.Click
         Using dialog As New OpenFileDialog()
             dialog.Filter = "MsBuild程序 (*.exe)|*.exe|所有文件 (*.*)|*.*"
@@ -312,11 +834,12 @@ Public Class Form1
 
             If dialog.ShowDialog() = DialogResult.OK Then
                 TxtMsbuild.Text = dialog.FileName
-
                 SaveLastParts()
             End If
         End Using
     End Sub
+
+    ' ==================== 浏览发布目录 ====================
     Private Sub BtnBrowsePublish_Click(sender As Object, e As EventArgs) Handles BtnBrowsePublish.Click
         Using dialog As New FolderBrowserDialog()
             dialog.Description = "选择发布目录"
@@ -330,74 +853,12 @@ Public Class Form1
 
             If dialog.ShowDialog() = DialogResult.OK Then
                 TxtPublishDir.Text = dialog.SelectedPath
-
                 SaveLastParts()
             End If
         End Using
     End Sub
-    Private Sub WriteFileData(iPath As String, fileContent As Object, Optional Encod As System.Text.Encoding = Nothing)
-        Try
-            If Encod Is Nothing Then
-                Encod = System.Text.Encoding.UTF8
-            End If
-            If TypeOf (fileContent) Is String Then
-                System.IO.File.WriteAllText(iPath, fileContent, Encod)
-            ElseIf TypeOf (fileContent) Is List(Of String) Then
-                System.IO.File.WriteAllLines(iPath, fileContent, Encod)
-            End If
 
-            Return
-        Catch ex As Exception
-            MessageBox.Show("保存文件时出错: " & ex.Message & vbCrLf & "文件路径: " & iPath)
-            Return
-        End Try
-    End Sub
-    Private Sub UpdataForms(iPath As String)
-        ' 创建一个小型通知窗口
-        Dim updateForm As New Form()
-        With updateForm
-            .Text = "新版本内容填写界面"
-            .Width = 400
-            .Height = 400
-            .StartPosition = FormStartPosition.CenterScreen
-            .FormBorderStyle = FormBorderStyle.FixedDialog
-            .MaximizeBox = False
-            .MinimizeBox = False
-        End With
-
-        ' 创建标签
-        Dim lblMessage As New TextBox With {
-        .Location = New Point(20, 20),
-        .Size = New Size(350, 200),
-        .Font = New Font("微软雅黑", 12), .Multiline = True
-    }
-
-        ' 创建按钮
-        Dim btnUpdateNow As New Button With {
-        .Text = "确定",
-        .Location = New Point(150, 240),
-        .Size = New Size(100, 30),
-        .BackColor = Color.LightGreen
-    }
-
-        updateForm.Controls.AddRange(btnUpdateNow, lblMessage)
-
-
-        AddHandler btnUpdateNow.Click, Sub()
-                                           Dim txt = lblMessage.Text
-                                           If Not String.IsNullOrEmpty(txt) Then
-                                               WriteFileData(iPath, txt)
-                                           End If
-
-                                           updateForm.DialogResult = DialogResult.Yes
-                                       End Sub
-        updateForm.ShowDialog()
-
-        If updateForm.DialogResult = DialogResult.Yes Then
-            ProjectPulish()
-        End If
-
-    End Sub
+    ' ==================== 开始发布按钮 ====================
     Private Sub BtnPublish_Click(sender As Object, e As EventArgs) Handles BtnPublish.Click
 
         SaveLastParts()
@@ -417,33 +878,56 @@ Public Class Form1
             MessageBox.Show("项目文件不存在", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
             Return
         End If
-        Dim IsCon As Boolean = TxtProjectFile.Text.Contains("Diff.vbproj")
-        If IsCon Then
-            Dim re As DialogResult = MessageBox.Show("是否添加新版本新增内容？", "新版本新增内容提示", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
-            If re = DialogResult.Yes Then
-                '更新文件路径
-                Dim Upath As String = "\\10.17.28.28\文件中转站\Program\updata.txt"
 
-                Try
-                    If System.IO.File.Exists(Upath) Then
-
-                        '写入更新内容
-                        UpdataForms(Upath)
-                        Return
-                    Else
-                        GoTo NextStep
-                    End If
-                Catch ex As Exception
-                    GoTo NextStep
-                End Try
-            Else
-                GoTo NextStep
+        ' MSBuild 为空时，尝试自动获取
+        If String.IsNullOrWhiteSpace(TxtMsbuild.Text) OrElse Not System.IO.File.Exists(TxtMsbuild.Text) Then
+            Dim autoMsbuild As String = FindMsBuildPath()
+            If Not String.IsNullOrEmpty(autoMsbuild) Then
+                TxtMsbuild.Text = autoMsbuild
+                SaveLastParts()
             End If
+        End If
+
+        ' --- 发布前弹出依赖确认对话框 ---
+        If Not ConfirmDependencies() Then
+            Return
         End If
 
 NextStep:
         ProjectPulish()
     End Sub
+
+    ' ==================== 发布前依赖确认 ====================
+    ''' <summary>
+    ''' 发布前弹出依赖确认窗体，让用户二次确认要复制的依赖项。
+    ''' 返回 True 表示确认继续发布，False 表示取消。
+    ''' </summary>
+    Private Function ConfirmDependencies() As Boolean
+        Try
+            ' 若列表为空，则重新扫描一次（防止项目文件刚被选中的情况）
+            If ClbDependencies.Items.Count = 0 AndAlso Not String.IsNullOrEmpty(TxtProjectFile.Text) Then
+                RefreshDependencyList(TxtProjectFile.Text)
+            End If
+
+            Dim msg As String
+            If ClbDependencies.Items.Count = 0 Then
+                msg = "未发现可复制的依赖项。" & vbCrLf & vbCrLf & "是否继续发布？"
+            Else
+                Dim checkedCount As Integer = GetCheckedDependencies().Count
+                msg = $"已发现 {ClbDependencies.Items.Count} 个依赖项，其中 {checkedCount} 个已勾选。" & vbCrLf & vbCrLf &
+                      "请在主界面的"“运行时依赖项”"列表中进行二次确认（默认已全部勾选）。" & vbCrLf & vbCrLf &
+                      "确认后点击"“是”"继续发布，点击"“否”"返回调整。"
+            End If
+
+            Dim result As DialogResult = MessageBox.Show(msg, "依赖确认", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+            Return result = DialogResult.Yes
+        Catch ex As Exception
+            LogMessage($"[依赖确认失败] {ex.Message}")
+            Return True
+        End Try
+    End Function
+
+    ' ==================== 项目发布主流程 ====================
     Private Sub ProjectPulish()
         ' 准备发布参数
         Dim projectFile As String = TxtProjectFile.Text
@@ -451,7 +935,15 @@ NextStep:
         Dim runtimeId As String = If(CboRuntime.SelectedItem?.ToString(), "win-x86")
         Dim projectName As String = System.IO.Path.GetFileName(projectFile)
 
+        ' 项目基础名（去掉扩展名），最终程序名使用该名称，不带版本号
+        Dim baseExeName As String = System.IO.Path.GetFileNameWithoutExtension(projectFile)
 
+        ' --- 确保版本号已读取（仅用于界面显示与项目维护，不影响程序名） ---
+        Dim versionText As String = TxtCustomExeName.Text.Trim()
+        If ChkSingleFile.Checked AndAlso String.IsNullOrWhiteSpace(versionText) Then
+            versionText = EnsureProjectVersion(projectFile)
+            TxtCustomExeName.Text = versionText
+        End If
 
         ' 构建 MSBuild 参数
         Dim arguments As String = $"""{projectFile}"" " &
@@ -461,24 +953,16 @@ NextStep:
                           $"/p:PublishSingleFile={If(ChkSingleFile.Checked, "true", "false")} " &
                           $"/p:RuntimeIdentifier={runtimeId} " &
                           "/p:IncludeNativeLibrariesForSelfExtract=true " &
-                          "/p:SignManifests=false " &          ' 新增：禁用清单签名
-                          "/p:SignAssembly=false " &           ' 新增：禁用程序集签名
-                          "/p:GenerateClickOnceManifests=false " & ' 新增：完全禁用 ClickOnce
-                          "/p:BootstrapperEnabled=false " &     ' ★ 新增：禁用引导程序生成
+                          "/p:SignManifests=false " &
+                          "/p:SignAssembly=false " &
+                          "/p:GenerateClickOnceManifests=false " &
+                          "/p:BootstrapperEnabled=false " &
                           $"/p:PublishDir=""{publishDir}"" " &
                           "/verbosity:minimal " &
                           "/nologo"
 
-        ' --- 新增：如果勾选了“单文件”并填写了自定义名称，则添加 AssemblyName 参数 ---
-        If ChkSingleFile.Checked Then
-            ' 移除用户可能输入的后缀，并确保名称合法（这里做简单处理）
-            Dim customName As String = TxtCustomExeName.Text.Trim()
-            Dim Vnum As String = ""
-            If customName <> "" Then
-                Vnum = $"_v{customName}"
-            End If
-            arguments = $"/p:AssemblyName={projectName.Substring(0, projectName.Length - 7)}{Vnum} " & arguments
-        End If
+        ' --- 程序名称固定为项目基础名，不带版本号 ---
+        arguments = $"/p:AssemblyName={baseExeName} " & arguments
 
         ' 查找 MSBuild
         Dim msbuildPath As String = TxtMsbuild.Text
@@ -500,14 +984,17 @@ NextStep:
         If confirm <> DialogResult.Yes Then
             Return
         End If
+
+        TxtLog.Visible = True
+        TxtLog.Clear()
+
+        ' ========== 发布前：列出用户勾选的依赖 ==========
+        LogCheckedDependencies()
+        LogMessage("")
+
         ' ========== 清理旧版本 ==========
         Try
-            Dim baseExeName As String = System.IO.Path.GetFileNameWithoutExtension(projectFile)   ' "Diff"
-            Dim newVersionSuffix As String = ""
-            If ChkSingleFile.Checked AndAlso Not String.IsNullOrWhiteSpace(TxtCustomExeName.Text) Then
-                newVersionSuffix = $"_v{TxtCustomExeName.Text.Trim()}"
-            End If
-            Dim newExeFullName As String = $"{baseExeName}{newVersionSuffix}.exe"
+            Dim newExeFullName As String = $"{baseExeName}.exe"
 
             Dim oldExes As String() = System.IO.Directory.GetFiles(publishDir, $"{baseExeName}*.exe", System.IO.SearchOption.TopDirectoryOnly)
             For Each oldExe In oldExes
@@ -522,13 +1009,9 @@ NextStep:
             LogMessage($"清理旧版本时出错: {ex.Message}")
         End Try
 
-        TxtLog.Visible = True
-
         Dim cur As Date = DateTime.Now
-        ' 开始发布
         BtnPublish.Enabled = False
         BtnCancel.Enabled = False
-        TxtLog.Clear()
 
         Try
             LogMessage("=== 开始发布 ===")
@@ -553,7 +1036,6 @@ NextStep:
             Using process As New Process()
                 process.StartInfo = startInfo
 
-                ' 实时输出处理
                 AddHandler process.OutputDataReceived,
                     Sub(s, evt)
                         If Not String.IsNullOrEmpty(evt.Data) Then
@@ -572,7 +1054,6 @@ NextStep:
                 process.BeginOutputReadLine()
                 process.BeginErrorReadLine()
 
-                ' 等待完成
                 While Not process.HasExited
                     Application.DoEvents()
                     Threading.Thread.Sleep(100)
@@ -582,21 +1063,17 @@ NextStep:
                 LogMessage($"=== 发布完成 ===")
                 LogMessage($"退出代码: {process.ExitCode}")
 
-                ' 检查目标 exe 是否生成
-                Dim targetExePattern As String = System.IO.Path.GetFileNameWithoutExtension(projectFile) & "_v*.exe"
-                If ChkSingleFile.Checked AndAlso Not String.IsNullOrWhiteSpace(TxtCustomExeName.Text) Then
-                    targetExePattern = System.IO.Path.GetFileNameWithoutExtension(projectFile) & $"_v{TxtCustomExeName.Text.Trim()}.exe"
-                Else
-                    targetExePattern = System.IO.Path.GetFileNameWithoutExtension(projectFile) & ".exe"
-                End If
-
+                Dim targetExePattern As String = $"{baseExeName}.exe"
                 Dim generatedExe As String = System.IO.Directory.GetFiles(publishDir, targetExePattern).FirstOrDefault()
 
                 If Not String.IsNullOrEmpty(generatedExe) Then
                     LogMessage($"状态: 成功 ✓ (主程序已生成: {System.IO.Path.GetFileName(generatedExe)})")
+
+                    ' ========== 发布后：复制用户勾选的依赖到发布目录（直接覆盖） ==========
+                    CopyCheckedDependencies(publishDir)
+
                     LogMessage($"总耗时:{DateDiff("s", cur, Now)}s")
 
-                    ' 询问是否创建桌面快捷方式
                     Dim createShortcutResult As DialogResult = MessageBox.Show(
                         "发布成功！是否在桌面创建快捷方式？",
                         "创建快捷方式",
@@ -605,13 +1082,10 @@ NextStep:
 
                     If createShortcutResult = DialogResult.Yes Then
                         Try
-                            ' 1. 获取桌面路径
                             Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
 
-                            ' 2. 确定目标程序路径
                             Dim targetPath As String = ""
-                            Dim projectBaseName As String = System.IO.Path.GetFileNameWithoutExtension(projectFile)
-                            Dim expectedExePath As String = System.IO.Path.Combine(publishDir, projectBaseName & ".exe")
+                            Dim expectedExePath As String = System.IO.Path.Combine(publishDir, $"{baseExeName}.exe")
 
                             If System.IO.File.Exists(expectedExePath) Then
                                 targetPath = expectedExePath
@@ -626,24 +1100,19 @@ NextStep:
                                 End If
                             End If
 
-                            ' 3. 获取快捷方式名称（包含后缀）
-                            Dim defaultName As String = projectName.Substring(0, projectName.Length - 7）
+                            Dim defaultName As String = baseExeName
                             Dim shortcutName As String = InputBox("请输入桌面快捷方式的名称（包含.lnk后缀）：", "快捷方式命名", defaultName & ".lnk")
 
-                            ' 如果用户取消或输入为空，使用默认名称
                             If String.IsNullOrWhiteSpace(shortcutName) Then
                                 shortcutName = defaultName & ".lnk"
                             End If
 
-                            ' 确保名称包含.lnk后缀
                             If Not shortcutName.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) Then
                                 shortcutName &= ".lnk"
                             End If
 
-                            ' 4. 构建完整的快捷方式路径
                             Dim shortcutPath As String = System.IO.Path.Combine(desktopPath, shortcutName)
 
-                            ' 5. 使用后期绑定创建快捷方式
                             Dim shellType As Type = Type.GetTypeFromProgID("WScript.Shell")
                             Dim shell As Object = Activator.CreateInstance(shellType)
                             Dim shortcut As Object = shellType.InvokeMember("CreateShortcut",
@@ -652,7 +1121,6 @@ NextStep:
                                                                           shell,
                                                                           New Object() {shortcutPath})
 
-                            ' 设置快捷方式属性
                             shortcut.GetType().InvokeMember("TargetPath",
                                                            System.Reflection.BindingFlags.SetProperty,
                                                            Nothing,
@@ -677,7 +1145,6 @@ NextStep:
                                                            shortcut,
                                                            New Object() {targetPath & ",0"})
 
-                            ' 保存快捷方式
                             shortcut.GetType().InvokeMember("Save",
                                                            System.Reflection.BindingFlags.InvokeMethod,
                                                            Nothing,
@@ -704,9 +1171,7 @@ NextStep:
             LogMessage($"[异常] {ex.Message}")
             MessageBox.Show($"发布过程中出现异常：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
-            ' 在发布完成后（无论退出代码是否为 0），清理不需要的文件
             Try
-                ' 删除 setup.exe、.application、.manifest 等 ClickOnce 文件
                 Dim extraFiles As String() = System.IO.Directory.GetFiles(publishDir, "setup.exe") _
                         .Concat(System.IO.Directory.GetFiles(publishDir, "*.application")) _
                         .Concat(System.IO.Directory.GetFiles(publishDir, "*.manifest")) _
@@ -720,7 +1185,6 @@ NextStep:
                     End If
                 Next
 
-                ' 删除 Application Files 文件夹
                 Dim appFilesDir As String = System.IO.Path.Combine(publishDir, "Application Files")
                 If System.IO.Directory.Exists(appFilesDir) Then
                     System.IO.Directory.Delete(appFilesDir, True)
@@ -736,18 +1200,18 @@ NextStep:
         End Try
     End Sub
 
-
-
+    ' ==================== 日志输出 ====================
     Private Sub LogMessage(message As String)
         TxtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}" & vbCrLf)
         TxtLog.ScrollToCaret()
     End Sub
 
+    ' ==================== 取消按钮 ====================
     Private Sub BtnCancel_Click(sender As Object, e As EventArgs) Handles BtnCancel.Click
         Me.Close()
     End Sub
 
-    ' 支持拖放项目文件到窗体
+    ' ==================== 支持拖放项目文件到窗体 ====================
     Private Sub Form1_DragEnter(sender As Object, e As DragEventArgs) Handles Me.DragEnter
         If e.Data.GetDataPresent(DataFormats.FileDrop) Then
             e.Effect = DragDropEffects.Copy
@@ -760,10 +1224,13 @@ NextStep:
             Dim file As String = files(0)
             If file.EndsWith(".csproj") OrElse file.EndsWith(".vbproj") OrElse file.EndsWith(".fsproj") Then
                 TxtProjectFile.Text = file
+                LoadVersionFromProject(file)
+                RefreshDependencyList(file)
             End If
         End If
     End Sub
 
+    ' ==================== 支持拖放项目文件到文本框 ====================
     Private Sub TxtProjectFile_DragEnter(sender As Object, e As DragEventArgs) Handles TxtProjectFile.DragEnter
         If e.Data.GetDataPresent(DataFormats.FileDrop) Then
             e.Effect = DragDropEffects.Copy
@@ -776,30 +1243,28 @@ NextStep:
             Dim file As String = files(0)
             If file.EndsWith(".csproj") OrElse file.EndsWith(".vbproj") OrElse file.EndsWith(".fsproj") Then
                 TxtProjectFile.Text = file
+                LoadVersionFromProject(file)
+                RefreshDependencyList(file)
             End If
         End If
     End Sub
 
+    ' ==================== 创建调试输出压缩包 ====================
     Private Sub CreateDebugOutputPackage(projectName As String, publishDir As String)
-        ' 检查 publishDir 是否存在
         If Not (System.IO.Directory.Exists(publishDir) OrElse System.IO.File.Exists(publishDir)) Then
             LogMessage($"[错误] 发布路径不存在: {publishDir}")
             Return
         End If
 
-        ' 确定输出目录和 ZIP 文件路径
         Dim outputDir As String = System.IO.Path.GetDirectoryName(publishDir)
         Dim zipFile As String = System.IO.Path.Combine(outputDir, $"{projectName}.zip")
 
-        ' 如果 ZIP 文件已存在，则删除旧文件
         If System.IO.File.Exists(zipFile) Then
             System.IO.File.Delete(zipFile)
             LogMessage($"删除旧文件: {zipFile}")
         End If
 
-        ' 判断 publishDir 是文件夹还是文件
         If System.IO.Directory.Exists(publishDir) Then
-            ' publishDir 是文件夹，打包整个文件夹
             LogMessage($"正在打包文件夹: {publishDir}")
             Try
                 System.IO.Compression.ZipFile.CreateFromDirectory(publishDir, zipFile, System.IO.Compression.CompressionLevel.Fastest, False)
@@ -810,15 +1275,11 @@ NextStep:
                 LogMessage($"[错误堆栈跟踪] {ex.StackTrace}")
             End Try
         Else
-            ' publishDir 是文件，直接将文件打包成 ZIP
             If System.IO.File.Exists(publishDir) Then
                 LogMessage($"正在打包文件: {publishDir}")
-
-                ' 创建 ZIP 文件
                 Try
                     Using zipStream As New System.IO.FileStream(zipFile, System.IO.FileMode.Create)
-                        Using zipArchive As System.IO.Compression.ZipArchive = New System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create)
-                            ' 将文件添加到 ZIP 文件中
+                        Using zipArchive As New System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create)
                             Dim entryName As String = System.IO.Path.GetFileName(publishDir)
                             System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(zipArchive, publishDir, entryName, System.IO.Compression.CompressionLevel.Fastest)
                         End Using
@@ -837,7 +1298,4 @@ NextStep:
         End If
     End Sub
 
-
-
 End Class
-
