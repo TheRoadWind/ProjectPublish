@@ -82,7 +82,6 @@ Public Class Form1
             If System.IO.File.Exists(lp) Then
                 TxtProjectFile.Text = lp
                 LoadVersionFromProject(lp)
-                ' 刷新依赖列表
                 RefreshDependencyList(lp)
             End If
         End If
@@ -138,8 +137,10 @@ Public Class Form1
         ' 设置窗体属性
         Me.Text = "项目发布工具"
         Me.StartPosition = FormStartPosition.CenterScreen
-        Me.MinimumSize = New Size(700, 720)
+        Me.MinimumSize = New Size(720, 700)
         Me.AllowDrop = True
+        ' 让日志先 Dock，避免遮挡
+        Me.Padding = New Padding(0)
 
         ' 创建控件
         CreateControls()
@@ -160,7 +161,9 @@ Public Class Form1
 
     ' ==================== 创建控件 ====================
     Private Sub CreateControls()
-        Dim yPos As Integer = 20
+        ' 起始位置适当上移
+        Dim yPos As Integer = 10
+        Dim rowGap As Integer = 35
 
         ' 项目文件选择
         lblProject = New Label With {
@@ -180,7 +183,7 @@ Public Class Form1
             .Location = New Point(580, yPos),
             .Size = New Size(80, 25)
         }
-        yPos += 40
+        yPos += rowGap
 
         ' 发布目录选择
         lblPublish = New Label With {
@@ -201,7 +204,7 @@ Public Class Form1
             .Size = New Size(80, 25)
         }
 
-        yPos += 40
+        yPos += rowGap
 
         ' MSBuild 目录
         LbAd = New Label With {
@@ -221,7 +224,7 @@ Public Class Form1
             .Size = New Size(80, 25)
         }
 
-        yPos += 40
+        yPos += rowGap
 
         ' 运行时标识符
         lblRuntime = New Label With {
@@ -259,7 +262,7 @@ Public Class Form1
             .Checked = False
         }
 
-        yPos += 40
+        yPos += rowGap
 
         ' --- 设置版本号输入框 ---
         lblCustomExeName = New Label With {
@@ -284,7 +287,7 @@ Public Class Form1
             .Font = New Font("微软雅黑", 8)
         }
 
-        yPos += 40
+        yPos += rowGap
 
         ' --- 依赖勾选列表框 ---
         lblDependencies = New Label With {
@@ -295,17 +298,12 @@ Public Class Form1
 
         ClbDependencies = New CheckedListBox With {
             .Location = New Point(140, yPos),
-            .Size = New Size(430, 110),
+            .Size = New Size(430, 100),
             .CheckOnClick = True,
             .HorizontalScrollbar = True
         }
-        ' 依赖列表框变化时，日志输出提示
-        AddHandler ClbDependencies.ItemCheck, Sub(s, evt)
-                                                  ' 只在勾选状态变化后延迟刷新（避免重入）
-                                                  ' 这里不做额外处理，保持默认行为
-                                              End Sub
 
-        yPos += 120
+        yPos += 110
 
         ' 发布按钮
         BtnPublish = New Button With {
@@ -333,14 +331,14 @@ Public Class Form1
             .BackColor = Color.LightGreen
         }
 
-        yPos += 40
+        yPos += 45
 
-        ' 日志文本框
+        ' 日志文本框：Dock 到底部，避免被工具栏遮挡
         TxtLog = New TextBox With {
             .Multiline = True,
             .ScrollBars = ScrollBars.Vertical,
-            .Location = New Point(0, yPos),
-            .Size = New Size(Me.Width, 220),
+            .Dock = DockStyle.Bottom,
+            .Height = 200,
             .ReadOnly = True,
             .Font = New Font("楷体", 10),
             .BackColor = Color.Black,
@@ -348,15 +346,16 @@ Public Class Form1
             .Visible = False
         }
 
-        ' 添加到窗体
+        ' 添加到窗体（注意：TxtLog 最后添加，Dock 才能正确计算剩余空间）
         Me.Controls.AddRange({
             lblProject, TxtProjectFile, BtnBrowseProject,
             lblPublish, TxtPublishDir, BtnBrowsePublish,
             LbAd, TxtMsbuild, BtnBrowseMsbuild,
             lblRuntime, CboRuntime, ChkSelfContained, ChkSingleFile,
-            BtnPublish, BtnCancel, TxtLog, ChkCreatExe, BtnCreateZip,
+            BtnPublish, BtnCancel, ChkCreatExe, BtnCreateZip,
             lblCustomExeName, TxtCustomExeName, lblTip,
-            lblDependencies, ClbDependencies
+            lblDependencies, ClbDependencies,
+            TxtLog
         })
 
         ' 压缩包复选框联动
@@ -393,20 +392,15 @@ Public Class Form1
     End Sub
 
     ' ==================== 判断是否为忽略项 ====================
-    ''' <summary>
-    ''' 判断给定名称是否属于需要排除的依赖项（Git/IDE/源码/项目文件）。
-    ''' </summary>
     Private Function IsIgnoredDependency(name As String) As Boolean
         If String.IsNullOrWhiteSpace(name) Then Return True
 
-        ' 名称完全匹配
         For Each ignore In DependencyIgnoreNames
             If String.Equals(name, ignore, StringComparison.OrdinalIgnoreCase) Then
                 Return True
             End If
         Next
 
-        ' 扩展名匹配
         Dim ext As String = System.IO.Path.GetExtension(name)
         If Not String.IsNullOrEmpty(ext) Then
             For Each ignoreExt In DependencyIgnoreExtensions
@@ -416,7 +410,6 @@ Public Class Form1
             Next
         End If
 
-        ' 特殊：.vbproj.user / .csproj.user 这类双扩展名
         For Each ignoreExt In DependencyIgnoreExtensions
             If name.EndsWith(ignoreExt, StringComparison.OrdinalIgnoreCase) Then
                 Return True
@@ -427,10 +420,6 @@ Public Class Form1
     End Function
 
     ' ==================== 获取项目依赖（文件夹与文件） ====================
-    ''' <summary>
-    ''' 扫描项目目录，返回候选依赖文件夹和文件（已排除 Git/IDE/源码/项目文件）。
-    ''' 仅扫描项目根目录下的直接子项，不递归。
-    ''' </summary>
     Private Function GetProjectDependencies(projectFilePath As String) As List(Of String)
         Dim result As New List(Of String)
         Try
@@ -445,14 +434,12 @@ Public Class Form1
 
             Dim projectFileName As String = System.IO.Path.GetFileName(projectFilePath)
 
-            ' 扫描目录（文件夹）
             For Each subFolderPath In System.IO.Directory.GetDirectories(projectDir)
                 Dim name As String = System.IO.Path.GetFileName(subFolderPath)
                 If IsIgnoredDependency(name) Then Continue For
                 result.Add(subFolderPath)
             Next
 
-            ' 扫描文件
             For Each file In System.IO.Directory.GetFiles(projectDir)
                 Dim name As String = System.IO.Path.GetFileName(file)
                 If IsIgnoredDependency(name) Then Continue For
@@ -466,9 +453,6 @@ Public Class Form1
     End Function
 
     ' ==================== 刷新依赖勾选列表框 ====================
-    ''' <summary>
-    ''' 根据项目文件重新扫描依赖，填入勾选列表框，默认全部勾选。
-    ''' </summary>
     Private Sub RefreshDependencyList(projectFilePath As String)
         Try
             If ClbDependencies Is Nothing Then Return
@@ -483,11 +467,8 @@ Public Class Form1
                 Dim isDir As Boolean = System.IO.Directory.Exists(item)
                 Dim name As String = System.IO.Path.GetFileName(item)
                 Dim display As String = If(isDir, $"[文件夹] {name}", $"[文件]   {name}")
-                ' 用对象保存完整路径，显示用 display
                 ClbDependencies.Items.Add(New DependencyItem(item, display), True)
             Next
-
-            ' 若列表为空，界面保持空即可；发布时会提示“本项目无依赖文件”
         Catch ex As Exception
             LogMessage($"[刷新依赖列表失败] {ex.Message}")
         End Try
@@ -511,9 +492,6 @@ Public Class Form1
     End Class
 
     ' ==================== 获取用户勾选的依赖 ====================
-    ''' <summary>
-    ''' 返回用户在勾选列表框中勾选的依赖项路径集合。
-    ''' </summary>
     Private Function GetCheckedDependencies() As List(Of String)
         Dim result As New List(Of String)
         Try
@@ -533,9 +511,6 @@ Public Class Form1
     End Function
 
     ' ==================== 日志输出勾选的依赖 ====================
-    ''' <summary>
-    ''' 在日志中列出用户勾选的依赖项；没有则提示“本项目无依赖文件”。
-    ''' </summary>
     Private Sub LogCheckedDependencies()
         Try
             Dim deps As List(Of String) = GetCheckedDependencies()
@@ -560,9 +535,6 @@ Public Class Form1
     End Sub
 
     ' ==================== 复制勾选的依赖到发布目录 ====================
-    ''' <summary>
-    ''' 将用户勾选的依赖文件夹与文件复制到发布目录，直接覆盖同名文件。
-    ''' </summary>
     Private Sub CopyCheckedDependencies(publishDir As String)
         Try
             If String.IsNullOrWhiteSpace(publishDir) OrElse Not System.IO.Directory.Exists(publishDir) Then
@@ -592,23 +564,18 @@ Public Class Form1
     End Sub
 
     ' ==================== 递归复制目录 ====================
-    ''' <summary>
-    ''' 递归复制目录到目标路径，overwrite 为 True 时覆盖同名文件。
-    ''' </summary>
     Private Sub CopyDirectory(sourceDir As String, targetDir As String, overwrite As Boolean)
         Try
             If Not System.IO.Directory.Exists(targetDir) Then
                 System.IO.Directory.CreateDirectory(targetDir)
             End If
 
-            ' 复制文件
             For Each file In System.IO.Directory.GetFiles(sourceDir)
                 Dim fileName As String = System.IO.Path.GetFileName(file)
                 Dim targetFile As String = System.IO.Path.Combine(targetDir, fileName)
                 System.IO.File.Copy(file, targetFile, overwrite)
             Next
 
-            ' 递归复制子目录
             For Each subFolderPath In System.IO.Directory.GetDirectories(sourceDir)
                 Dim subFolderName As String = System.IO.Path.GetFileName(subFolderPath)
                 Dim targetSubDir As String = System.IO.Path.Combine(targetDir, subFolderName)
@@ -812,7 +779,6 @@ Public Class Form1
             If dialog.ShowDialog() = DialogResult.OK Then
                 TxtProjectFile.Text = dialog.FileName
                 LoadVersionFromProject(dialog.FileName)
-                ' 刷新依赖列表
                 RefreshDependencyList(dialog.FileName)
                 SaveLastParts()
             End If
@@ -863,7 +829,6 @@ Public Class Form1
 
         SaveLastParts()
 
-        ' 验证输入
         If String.IsNullOrWhiteSpace(TxtProjectFile.Text) Then
             MessageBox.Show("请选择项目文件", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
             Return
@@ -879,7 +844,6 @@ Public Class Form1
             Return
         End If
 
-        ' MSBuild 为空时，尝试自动获取
         If String.IsNullOrWhiteSpace(TxtMsbuild.Text) OrElse Not System.IO.File.Exists(TxtMsbuild.Text) Then
             Dim autoMsbuild As String = FindMsBuildPath()
             If Not String.IsNullOrEmpty(autoMsbuild) Then
@@ -888,7 +852,6 @@ Public Class Form1
             End If
         End If
 
-        ' --- 发布前弹出依赖确认对话框 ---
         If Not ConfirmDependencies() Then
             Return
         End If
@@ -898,13 +861,8 @@ NextStep:
     End Sub
 
     ' ==================== 发布前依赖确认 ====================
-    ''' <summary>
-    ''' 发布前弹出依赖确认窗体，让用户二次确认要复制的依赖项。
-    ''' 返回 True 表示确认继续发布，False 表示取消。
-    ''' </summary>
     Private Function ConfirmDependencies() As Boolean
         Try
-            ' 若列表为空，则重新扫描一次（防止项目文件刚被选中的情况）
             If ClbDependencies.Items.Count = 0 AndAlso Not String.IsNullOrEmpty(TxtProjectFile.Text) Then
                 RefreshDependencyList(TxtProjectFile.Text)
             End If
@@ -929,16 +887,13 @@ NextStep:
 
     ' ==================== 项目发布主流程 ====================
     Private Sub ProjectPulish()
-        ' 准备发布参数
         Dim projectFile As String = TxtProjectFile.Text
         Dim publishDir As String = TxtPublishDir.Text
         Dim runtimeId As String = If(CboRuntime.SelectedItem?.ToString(), "win-x86")
         Dim projectName As String = System.IO.Path.GetFileName(projectFile)
 
-        ' 项目基础名（去掉扩展名），最终程序名使用该名称，不带版本号
         Dim baseExeName As String = System.IO.Path.GetFileNameWithoutExtension(projectFile)
 
-        ' --- 确保版本号已读取（仅用于界面显示与项目维护，不影响程序名） ---
         Dim versionText As String = TxtCustomExeName.Text.Trim()
         If ChkSingleFile.Checked AndAlso String.IsNullOrWhiteSpace(versionText) Then
             versionText = EnsureProjectVersion(projectFile)
@@ -946,9 +901,12 @@ NextStep:
         End If
 
         ' 构建 MSBuild 参数
+        ' 新增：/p:DebugType=None /p:DebugSymbols=false 让发布不产生 .pdb
         Dim arguments As String = $"""{projectFile}"" " &
                           "/t:Restore;Publish " &
                           "/p:Configuration=Release " &
+                          "/p:DebugType=None " &
+                          "/p:DebugSymbols=false " &
                           $"/p:SelfContained={If(ChkSelfContained.Checked, "true", "false")} " &
                           $"/p:PublishSingleFile={If(ChkSingleFile.Checked, "true", "false")} " &
                           $"/p:RuntimeIdentifier={runtimeId} " &
@@ -961,17 +919,15 @@ NextStep:
                           "/verbosity:minimal " &
                           "/nologo"
 
-        ' --- 程序名称固定为项目基础名，不带版本号 ---
+        ' 程序名称固定为项目基础名，不带版本号
         arguments = $"/p:AssemblyName={baseExeName} " & arguments
 
-        ' 查找 MSBuild
         Dim msbuildPath As String = TxtMsbuild.Text
         If String.IsNullOrEmpty(msbuildPath) Then
             MessageBox.Show("请重新选择Msbuild程序路径", "错误", MessageBoxButtons.OK)
             Return
         End If
 
-        ' 显示确认对话框
         Dim confirm As DialogResult = MessageBox.Show(
             $"即将发布项目：{projectName}" & vbCrLf & vbCrLf &
             $"发布路径：{publishDir}" & vbCrLf &
@@ -1172,10 +1128,10 @@ NextStep:
             MessageBox.Show($"发布过程中出现异常：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
             Try
+                ' 注意：已通过 /p:DebugType=None 禁止生成 .pdb，这里不再清理 *.pdb
                 Dim extraFiles As String() = System.IO.Directory.GetFiles(publishDir, "setup.exe") _
                         .Concat(System.IO.Directory.GetFiles(publishDir, "*.application")) _
                         .Concat(System.IO.Directory.GetFiles(publishDir, "*.manifest")) _
-                        .Concat(System.IO.Directory.GetFiles(publishDir, "*.pdb")) _
                         .Concat(System.IO.Directory.GetFiles(publishDir, "*.tmp")) _
                         .ToArray()
                 For Each f In extraFiles
